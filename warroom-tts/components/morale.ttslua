@@ -1,0 +1,37 @@
+----#include components/morale
+Morale = {Zones = {
+    {name = 'White', label = 'Acceptable Stress', color = 'fbfcfc'},
+    {name = 'Blue', label = 'Labor and Civil Unrest', color = 'aed6f1'},
+    {name = 'Yellow', label = 'Dysfunctional Infrastructure', color = 'f7dc6f'},
+    {name = 'Orange', label = 'Supply Lines Disrupted', color = 'e59866'},
+    {name = 'Red', label = 'Economic Collapse', color = 'f1948a'},
+    {name = 'Grey', label = 'Mass Desertions', color = 'abb2b9'}
+}}
+
+function Morale:initialize(board, scenario)
+    setmetatable(getmetatable(self).__index, {__index = board})
+    self.stacks, self.stress, self.medals, self.snaps = {}, {}, {}, {}
+    local origin, flip = self.getPosition(), scenario ~= 'global' and scenario ~= 'eastern' and not self.is_face_down
+    local snaps, nations, nation, unit = self.getSnapPoints(), Nations:moraleOrder()
+    for i, snap in ipairs(snaps) do
+        if (i - 1) % 11 == 0 then
+            nation = table.remove(nations)
+            self.snaps[nation], unit = {}, 'medal_goods'
+        elseif unit ~= 'medal_goods' then
+            unit = next(Units, unit ~= 'stress' and unit:gsub('fighter', 'c%0') or nil)
+        else unit = 'stress' end
+        if flip then snap.position, snap.rotation.z = snap.position:rotateOver('z', 180) + vector(0, 0.2, 0), (snap.rotation.z + 180) % 360 end
+        self.snaps[nation][unit] = snap.position
+    end
+    if flip then
+        self.setLock(false)
+        self.flip()
+        self.setSnapPoints(snaps)
+        Wait.condition(|| self.setLock(true), || self.resting)
+    end
+    self:loadUI(scenario)
+    log('Morale board initialized')
+end
+
+----#include components/morale
+

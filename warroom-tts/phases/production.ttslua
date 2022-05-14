@@ -1,0 +1,163 @@
+----#include phases/production
+Production = Phase()
+
+function Production:main()
+    HUD.updateTracker('Write unit purchase orders', '7 - Production', 'production')
+    HUD.resetStatus()
+    for nation, orders in pairs(Orders) do orders:restoreProduction() end
+    local ps, new_units = {}, {}
+    if state.scenario == 'global' and not state.pact_broken then
+        Orders.japan.UI.setAttribute('pact', 'interactable', false)
+        Orders.ussr.UI.setAttribute('pact', 'interactable', false)
+    end
+    if state.phase < 7 or state.step < 2 then
+        local readied, trades = {}, {axis = {}, allies = {}}
+        if state.scenario == 'global' then for _, region in pairs(Map.regions) do if region.trade then
+            local owner = region:owner()
+            if owner ~= 'neutral' then trades[Nations[owner].side][region.trade] = 'land'
+            else for _, link in ipairs(region.adjacent) do
+                local id, flag = link:match('(%a%d+)(.?)')
+                owner = Map.regions[id]:owner()
+                if flag == '$' then
+                    local commands = Commands:region(id)
+                    if not commands.axis.fleet then debug('Allies can trade by port') trades.allies[region.trade] = trades.allies[region.trade] or 'sea'
+                    elseif commands.axis.fleet and not commands.allies.fleet and not region.allied then
+                        trades.axis[region.trade] = trades.axis[region.trade] or 'sea'
+                end elseif owner and owner ~= 'neutral' and not Cards[id].is_face_down then
+                    trades[Nations[owner].side][region.trade] = 'land'
+        end end end end end end
+        for nation, orders in pairs(Orders) do
+            readied[nation] = false
+            local routes = {}
+            if nation ~= 'china' then for resource, flag in pairs(trades[Nations[nation].side]) do
+                if flag == 'land' or flag == 'sea' and Morale.stressZone(nation) < 3 then routes[resource] = true end
+                debug(nation, ' can trade ', resource)
+            end end
+            orders:writeProduction(|...| self.resume(...), routes, state.phase == 7)
+        end
+        state.phase, state.step = 7, 1
+        Phase.readyLoop(readied)
+    else for _, unit in Tags.forAllObjects('production') do
+        local nation
+        for _, tag in ipairs(unit.getTags()) do if Nations[tag] then nation = tag break end end
+        new_units[nation] = new_units[nation] or {}
+        table.insert(new_units[nation], unit)
+    end end
+    HUD.updateTracker('Reveal purchases and update resources')
+    HUD.open('production')
+    for i, nation in turnOrder() do
+        local purchases, cg = Orders[nation]:revealPurchases()
+        if purchases.cg then
+            cg, purchases.cg = purchases.cg
+            if state.step == 1 then Morale:addGoods(nation, cg) end
+            if state.step == 1 and i > 1 then
+                UI.setValue('cg' .. i, '')
+                Wait.time(|| UI.setValue('cg' .. i, cg), (i - 1) * 0.5)
+            else UI.setValue('cg' .. i, cg) end
+        else UI.setValue('cg' .. i, '') end
+        if state.step == 1 and next(purchases) ~= nil then table.insert(ps, Units:buildStack(purchases,
+            Orders[nation].getPosition() - Orders[nation].getTransformForward() * 10,
+            Orders[nation].getRotation()
+        ):next(function (...) new_units[nation] = {...} end)) end
+        for unit, t in pairs(Units) do if t.cost then
+            if purchases[unit] and state.step == 1 and i > 1 then
+                UI.setValue(unit .. i, '')
+                Wait.time(|| UI.setValue(unit .. i, purchases[unit]), (i - 1) * 0.5)
+            else UI.setValue(unit .. i, purchases[unit] or '') end
+    end end end
+    if #ps > 0 then
+        Promise.all(ps):next(|| self.resume())
+        coroutine.yield()
+        for nation, orders in pairs(Orders) do Resources[nation]:set(orders.resources.remaining) end
+    end
+    HUD.updateTracker('Transfer new units to industries', nil, 'transfer')
+    state.step, ps = 2, {}
+    local readied = {}
+    for nation, orders in pairs(Orders) do if new_units[nation] then
+        readied[nation] = false
+        HUD.updateStatus(nation, false)
+        orders:enableReady(|...| self.resume(...))
+        orders.UI.setAttribute('ready', 'interactable', true)
+        for _, unit in ipairs(new_units[nation]) do
+            setGlow(unit, Color[nation])
+            unit.addTag(nation)
+            unit.addTag('production')
+    end else HUD.updateStatus(nation, true) end end
+    Phase.readyLoop(readied, next(readied) == nil, function (nation, ready) if ready then
+        debug('Checking production placements for ', nation)
+        local units, by_region, invalid, valid = new_units[nation], {}, {}, {Promise()}
+        for i = #units, 1, -1 do if units[i] == nil then table.remove(units, i) end end
+        for _, unit in ipairs(units) do
+            local id = Map:getRegion(unit)
+            if not id then table.insert(invalid, unit) debug('Invalid placement: unit not on map') else
+                local region = Map.regions[id]
+                if region:owner() ~= nation then table.insert(invalid, unit) debug('Invalid placement: unit not in region controlled by owner')
+                elseif region.mobilization and unit.getName() ~= 'infantry' then table.insert(invalid, unit) debug('Invalid placement: only infantry can mobilize')
+                elseif not region.port and Units[unit.getName()].force == 'fleet' then table.insert(invalid, unit) debug('Invalid placement: naval unit in region without port')
+                else
+                    by_region[id] = by_region[id] or {}
+                    table.insert(by_region[id], unit)
+        end end end
+        local free_commands = Commands:free(nation)
+        for id, produced in pairs(by_region) do
+            local region = Map.regions[id]
+            if (nation == 'china' and region.mobilization or region:production()) < #produced then
+                debug('Invalid placement: units exceed production capacity in ', id)
+                for _, unit in ipairs(produced) do table.insert(invalid, unit) end
+            else if nation == 'china' and region.mobilization then debug('Mobilizing infantry in ', id)
+                local new_command = #free_commands > 0 and table.remove(free_commands) or nil
+                for _, command in pairs(Commands.china) do if command:region() == id then
+                    local merge = {}
+                    for i = #produced, 1, -1 do if (command.getPosition() - produced[i].getPosition()):setAt('y', 0):magnitude() < 0.5 then
+                        table.insert(merge, table.remove(produced, i))
+                    end end
+                    if #merge > 0 then if command.units() + #merge < 9 then debug('Merging ', #merge, ' mobilized infantry into ', tostring(command))
+                        table.insert(valid, valid[1]:next(function ()
+                            self.clearTags(merge)
+                            return command:combine(merge)
+                        end))
+                    else debug('Unable to merge, too many units') for _, unit in ipairs(merge) do table.insert(invalid, unit) end end end
+                end end
+                if #produced > 0 then if new_command then debug('Forming new command')
+                    table.insert(valid, valid[1]:next(|| self:mobilization(new_command, produced)))
+                else debug('No new commands available') for _, unit in ipairs(merge) do table.insert(invalid, unit) end end end
+            else debug('Forming construction stack in ', id)
+                table.insert(valid, valid[1]:next(|| self:construction(region, produced)))
+        end end end
+        if #invalid == 0 then
+            new_units[nation] = {}
+            table.insert(ps, Promise.all(valid))
+            valid[1]:resolve()
+            Orders[nation].UI.hide('ready')
+        else
+            debug('Failed to place new units')
+            valid[1]:reject()
+            return false
+    end end end)
+    if #ps > 0 then
+        Promise.all(ps):next(|| self.resume())
+        coroutine.yield()
+    end
+    self.resume = nil
+end
+
+function Production:construction(region, units)
+    local p = Promise()
+    self.clearTags(units)
+    Bags.bomb_industry.takeObject({
+        position = units[1].getPosition() + vector(0, 2, 0),
+        callback_function = function (obj) Construction(obj):attach(units):next(function (c)
+            region.construction = c
+            p:resolve()
+    end) end})
+    return p
+end
+
+function Production:mobilization(command, units)
+    self.clearTags(units)
+    command.setPositionSmooth(units[1].getPosition() + vector(0, 1, 0))
+    return command:notMoving():next(|c| c:attach(units))
+end
+
+function Production.clearTags(units) table.each(units, |unit| unit.setTags({unit.getName()})) end
+

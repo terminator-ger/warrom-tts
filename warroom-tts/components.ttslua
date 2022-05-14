@@ -1,0 +1,11 @@
+#include components/battle
+#include components/cards
+#include components/commands
+#include components/dice
+#include components/hotspot
+#include components/map
+#include components/morale
+#include components/orders
+#include components/resources
+#include components/stack
+#include components/units

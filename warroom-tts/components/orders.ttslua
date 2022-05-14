@@ -1,0 +1,52 @@
+----#include components/orders
+Orders = {}
+setmetatable(Orders, {__pairs = function (T, k) return function (t, k)
+    local v
+    repeat k, v = next(t, k)
+    until v == nil or type(v) == 'table'
+    if v ~= nil then return k, v end
+end, T, nil end})
+
+function Orders:loaded() return Promise.condition(function ()
+    for _, orders in pairs(self) do if orders.UI.getXml() == '' then return false end end
+    return true
+end) end
+
+OrdersChart = Wrapper(function (t, nation)
+    t.nation, t.not_china = nation, nation ~= 'china'
+    return t
+end)
+
+function OrdersChart:initialize(scenario)
+    log('Initializing ' .. self.nation .. ' orders')
+    self.resources = {current = {oil = self.not_china and 0 or nil, iron = 0, osr = 0}}
+    local order_count = Scenarios[scenario].nations[self.nation]
+    if not state.orders[self.nation] then
+        state.orders[self.nation] = {}
+        if self.not_china then
+            self:setState(0, 'bid')
+            self.trade = {}
+            state.orders[self.nation].trade = self.trade
+        end
+        self:setState({}, 'moves')
+        for i = 1, order_count do self:setState({}, 'moves', i) end
+        self.purchases = {}
+        state.orders[self.nation].purchases = self.purchases
+    else
+        self:restore(state.orders[self.nation])
+        for i, move in ipairs(self.moves) do
+            if move.command then move.command = Commands[self.nation][move.command] end
+            if move.target then move.target = Map.regions[move.target] end
+    end end
+    self:loadUI(scenario)
+    return self
+end
+
+function OrdersChart:restore(state)
+    for k, v in pairs(state) do if k ~= 'purchases' and k ~= 'trade' and type(v) == 'table' then
+        self[k] = {}
+        if next(v) then OrdersChart.restore(self[k], v) end
+    else self[k] = v end end
+end
+
+----#include components/orders

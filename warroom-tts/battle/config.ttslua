@@ -1,0 +1,99 @@
+----#include battle/config
+function Battle.diceHandler(zone, value)
+    if Battle.left.zones_active and zone.hasTag('left') then
+        Battle.left:updateDice(zone, value)
+    elseif Battle.right.zones_active and zone.hasTag('right') then
+        Battle.right:updateDice(zone, value)
+    end
+end
+
+function Battle:initialize()
+    self.bags = {}
+    for side in pairs(Nations.other) do self.bags[side] = Dice(Tags.getObject({self.hand, side, 'dice'})) end
+    self:setupZones()
+    self:loadUI()
+    self.RepairAssets = {}
+    for _, asset in ipairs(UI.getCustomAssets()) do
+        if Nations[asset.name] or asset.name:match('[io][irs][lor]n?') then
+            table.insert(self.RepairAssets, asset)
+    end end
+    return self
+end
+
+function Battle:setupZones()
+    log('Initializing battle zones')
+    self.commands = Battle.Zone(Tags.getObject({self.hand, 'command'}), {z = 0.178})
+    self.casualties, self.stances = {}, {land = {}, sea = {}}
+    local naval = self:mode() == 'sea'
+    local v = self.positionToLocal(self.commands.getPosition()):setAt('y', naval and 0 or 0.2)
+    for side, params in pairs{
+        axis = {tilt = 33, x = -0.008},
+        allies = {tilt = -33, x = 0.011}
+    } do
+        self.casualties[side] = Battle.Zone(Tags.getObject({self.hand, side, 'casualty'}), {z = 0.01})
+        for nation, x in pairs(Battle.Snaps[self:mode()][side].nations) do self.commands.snaps[nation] = {
+            position = v:copy():setAt('x', x),
+            rotation = vector(0, naval and params.tilt or 0, naval and -180 or 0)
+        } end
+        for mode, t in pairs(self.stances) do
+            t[side] = {}
+            setmetatable(t[side], {__index = {x = params.x}})
+        end
+        for unit, specs in pairs(Units) do for stance, data in pairs(specs.stances or {}) do
+            local mode, zone = self:mode(), Tags.getObject({self.hand, side, unit, stance})
+            if not zone then for _, obj in Tags.forAllObjects({self.hand, side}) do
+                if obj.memo == unit .. '-' .. stance then zone, mode = obj, naval and 'land' or 'sea' break end
+            end end
+            local rotation = specs.force == 'fleet' and vector(0, params.tilt, -180) or vector(0, 0, mode == 'land' and 0 or -180)
+            local y = mode == 'land' and 0.2 or 0
+            local snaps, xs = Battle.Snaps[mode][side], {casualty = Battle.Snaps[mode][side].casualty}
+            zone = Battle.Stance(zone, data)
+            zone.side, zone.unit = side, unit
+            local z = self.positionToLocal(zone.getPosition()).z - (mode == self:mode() and 0 or zone.z)
+            for nation, x in pairs(snaps.nations) do if nation ~= 'china' or specs.force == 'army' then xs[nation] = x end end
+            if zone.hp == 3 then xs.sustained, xs.damaged2 = snaps.sustained, snaps.damaged2
+            elseif zone.hp == 2 then xs.damaged = snaps.damaged end
+            for label, x in pairs(xs) do zone.snaps[label] = {position = vector(x, y, z), rotation = rotation} end
+            if unit == 'submarine' then zone.snaps.escaped = {position = vector(side == 'axis' and -1.275 or 1.27, y, -0.365), rotation = vector(0, 0, -180)} end
+            self.stances[mode][side][unit] = self.stances[mode][side][unit] or {}
+            self.stances[mode][side][unit][stance] = zone
+        end end
+    end
+end
+
+Battle.Zone = {}
+setmetatable(Battle.Zone, {__call = function (T, obj, z)
+    z = z or {}
+    z.obj, z.snaps = obj, {}
+    setmetatable(z, {__index = |t, k| T[k] or t.obj[k]})
+    return z
+end})
+
+Battle.Stance = {}
+setmetatable(Battle.Stance, {__call = function (T, obj, params)
+    local t, z = {}, Battle.Zone(obj)
+    setmetatable(t, {__index = |_, k| params[k] or T[k] or z[k]})
+    return t
+end})
+
+function Battle.Stance:getUnits()
+    self.units = self.getObjects()
+    return self.units
+end
+
+Battle.Snaps = {land = {
+    axis = {sustained = 0.88, damaged = 1.035, damaged2 = 1.085, casualty = 1.29, nations = {
+        italy = 0.325, japan = 0.515, germany = 0.69,
+    }},
+    allies = {sustained = -0.87, damaged = -1.025, damaged2 = -1.075, casualty = -1.285, nations = {
+        uk = -0.3, ussr = -0.465, usa = -0.63, china = -0.8
+    }}
+}, sea = {
+    axis = {sustained = -0.89, damaged = -1.035, damaged2 = -1.085, casualty = -1.29, nations = {
+        italy = -0.335, japan = -0.525, germany = -0.705,
+    }},
+    allies = {sustained = 0.885, damaged = 1.025, damaged2 = 1.08, casualty = 1.285, nations = {
+        uk = 0.34, ussr = 0.52, usa = 0.7
+    }}
+}}
+

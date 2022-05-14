@@ -1,0 +1,4 @@
+#include config/commands
+#include config/help
+#include config/nations
+#include config/scenario

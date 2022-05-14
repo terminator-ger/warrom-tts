@@ -1,0 +1,16 @@
+----#include components/hotspot
+Hotspot = {}
+Hotspot.__meta = wrapper(Hotspot)
+setmetatable(Hotspot, {__call = function (T, ...) if select('#', ...) > 2 then
+    local region, data = select(2, ...)
+    Map.regions[region].hotspot.resume(data)
+else
+    local obj, region = ...
+    local t = wrap(T, obj)
+    if obj.memo == nil then obj.memo = region end
+    t.region = obj.memo
+    t:regionLabel()
+    return t
+end end})
+
+----#include components/hotspot

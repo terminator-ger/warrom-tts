@@ -1,0 +1,106 @@
+----#include saveload
+function onSave()
+    if not state.phase then return ''
+    else return JSON.encode(state) end
+end
+
+function onLoad(saved_state)
+    for _, obj in Tags.forAllObjects('components') do if #obj.getObjects() == 0 then obj.interactable = false end end
+    for _, obj in Tags.forAllObjects('static') do obj.interactable = false end
+    for _, label in ipairs{'left', 'right'} do
+        Battle[label] = Battle(Tags.getObject({'Battle', label}), label):initialize()
+    end
+    Bags = {}
+    for _, obj in Tags.forAllObjects('supply') do
+        local item, key = nil
+        for _, tag in ipairs(obj.getTags()) do
+            if Nations[tag] then key = tag
+            elseif tag == 'stress' then item, key = tag, obj.value
+            elseif tag ~= 'supply' then item = tag
+        end end
+        if key then
+            Bags[item] = Bags[item] or {}
+            Bags[item][key] = obj
+        elseif item == 'dice' then Bags[item] = Dice(obj)
+        else Bags[item] = obj end
+    end
+    Hotspot:initAssets()
+    if saved_state == '' then
+        state = {}
+        UI.setXmlTable(HUD.XML:initial())
+    else
+        state = JSON.decode(saved_state)
+        UI.setXmlTable(HUD.XML:scenario(state.scenario))
+        HUD.loaded():next(loadState)
+    end
+end
+
+function loadState()
+    Setup.initialize()
+    -- Identify tokens, commands, construction stacks, cfighters, and hotspots
+    for _, obj in ipairs(getObjects()) do
+        local name, region = obj.getName():lower(), Map:getRegion(obj)
+        region = region and Map.regions[region]
+        if #name > 0 and region then
+            if name == 'hotspot' then
+                local hotspot = Hotspot(obj, region.id)
+                Map.regions[hotspot.region].hotspot = hotspot
+            elseif name:match('flag') then region.flag = obj
+            elseif name == 'cfighter' and obj.memo ~= '' then
+                table.insert(Commands.cfighters, Command(obj, obj.memo))
+            elseif name:match('construction') then
+                region.construction = Construction(obj):restoreUnits()
+            elseif name == 'bomb_industry' and obj.is_face_down then
+                if region.bombs then table.insert(region.bombs, obj) else region.bombs = {obj} end
+            elseif name:match('standing army') then
+                region.flag, Commands.standing[region.id] = obj, Standing(obj)
+        end end
+        if obj.name == 'Card' then
+            local card = Card(obj, name:match('^%b[](%a%d+)%b[]'))
+            Cards[card.id] = card
+            Map.regions[card.id].card = card
+        else
+            local nation, token, id = name:match('(%a+) (%a+) token')
+            if nation and token then Tokens[token][nation] = obj end
+            nation, id = name:match('^%b[](%a+)%b[] (%d+)%a+ %a+')
+            if nation and id then
+                Commands[nation] = Commands[nation] or {}
+                Commands[nation][tonumber(id)] = Command(obj):restoreUnits():updateContextMenu()
+                if #obj.getJoints() > 0 then
+                    getObjectFromGUID(obj.getJoints()[1].joint_object_guid).interactable = false
+    end end end end
+    log('Commands loaded')
+    Setup.initNations()
+    for i, nation in turnOrder() do
+        UI.setAttributes('tracker' .. i, {image = nation, active = true})
+        UI.show('status' .. i)
+        for resource in Resources() do UI.show('frame-' .. resource .. i) end
+    end
+    Orders:loaded():next(function ()
+        for nation in pairs(Scenarios[state.scenario].nations) do
+            local cards, rack = Cards[nation]:sort()
+            if #cards > 0 then
+                Cards[nation].first = cards[1]
+                for i = 2, #cards do cards[i - 1].next, cards[i].prev = cards[i], cards[i - 1] end
+                Cards[nation].origin = {position = cards[1].getPosition(), rotation = cards[1].getRotation():setAt('z', 0)}
+            else
+                for _, obj in Tags.forAllObjects({nation, 'cardholder'}) do if obj.value == 1 then rack = obj break end end
+                Cards[nation].origin = {position = rack.positionToWorld({0, 0, 0.7075}), rotation = rack.getRotation()}
+            end
+            if not Tokens.turn[nation] then
+                Orders[nation].UI.setXml('')
+                Orders[nation], Resources[nation], Commands.trays[nation] = nil
+                for id, region in pairs(Map.regions) do if id:match('^' .. Nations[nation].prefix) then
+                    region.collapsed = true
+                end end
+            else Resources[nation]:loaded() end
+        end
+        if state.scenario == 'global' and not state.pact_broken then
+            Orders.japan.UI.show('pact')
+            Orders.ussr.UI.show('pact')
+        end
+        Setup.zoneEvents()
+        Round()
+    end)
+end
+

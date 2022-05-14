@@ -1,0 +1,9 @@
+#include phases/cleanup
+#include phases/combat
+#include phases/economy
+#include phases/morale
+#include phases/movement
+#include phases/planning
+#include phases/production
+#include phases/refit
+#include phases/setup

@@ -1,0 +1,174 @@
+----#include phases/combat
+-- TODO:
+---- 1. Dependencies between combats: raids spawning or canceling, change in port advantage, etc.
+---- 2. Multiple battles due to pact, or due to ownership reversion
+
+Combat = Phase()
+
+function Combat:main()
+    HUD.updateTracker('Resolve hotspots', '4 - Combat Operations', 'combat')
+    HUD.resetStatus()
+    local commands
+    if state.phase < 4 then
+        HUD.close('orders')
+        if state.scenario == 'global' and not state.pact_broken then
+            debug('Checking for Article 4 violations')
+            local destroyed = {}
+            for nation, other in pairs{japan = 'ussr', ussr = 'japan'} do for id, command in pairs(Commands[nation]) do if id > 19 then
+                local region = command:region()
+                if region and Map.regions[region]:owner() == other then table.insert(destroyed, command) end
+            end end end
+            if #destroyed > 0 then
+                for i = 1, #destroyed do destroyed[i] = destroyed[i]:destroy() end
+                Promise.all(destroyed):next(|| self.resume())
+                coroutine.yield()
+        end end
+        debug('Placing new hotspots')
+        commands = Commands:byRegion()
+        local ps = {}
+        for id, commands in pairs(commands) do
+            local region, action = Map.regions[id], Hotspot.action({region = id}, commands)
+            if action then
+                debug(id, ' is a ', action, ' hotspot')
+                if not region.hotspot then
+                    debug('Placing new hotspot in ', id)
+                    local p, pos = Promise(), region.centroid or region.circle.c
+                    table.insert(ps, region:placeHotspot():next(function (obj)
+                        obj.addTag('active')
+                        Wait.condition(|| obj.setRotationSmooth({0, region:angle(), 0}), || obj.resting)
+                    end))
+                else region.hotspot.UI.show('region') end
+            else
+                debug('No hotspot action in ', id)
+                for side, forces in pairs(commands) do for _, command in ipairs(forces.air or {}) do
+                    if command.hasTag('landing') then table.insert(ps, command:placeArrow()) end
+                end end
+                if region.hotspot then
+                    debug('Removing invalid hotspot')
+                    table.insert(ps, region:removeHotspot())
+        end end end
+        state.phase, state.step = 4, #turnOrder.get()
+        if #ps > 0 then
+            Promise.all(ps):next(|| self.resume())
+            coroutine.yield()
+    end else state.step = state.step == 1 and #turnOrder.get() or state.step - 1 end
+    debug('Setting up combat HUD')
+    commands = commands or Commands:byRegion()
+    local regions, combatants = {}, {}
+    for id, region in pairs(Map.regions) do if region.hotspot then
+        table.insert(regions, {angle = (160 - region:angle()) % 360, region = region})
+        combatants[id] = region.hotspot:getCombatants(commands[id])
+    end end
+    table.sort(regions, |a, b| a.angle < b.angle)
+    for i, data in ipairs(regions) do
+        local hotspot = data.region.hotspot
+        hotspot.hud = i
+        debug('Displaying hotspot ', i)
+        local clr, region, name = data.region:colorizedName():match('%[(%w+)%](%a%-?%d+)%b[](.*)')
+        UI.setValue('combat-id' .. i, region)
+        UI.setAttribute('combat-id' .. i, 'color', '#' .. clr)
+        if name ~= '' then
+            UI.setValue('combat-name' .. i, name:sub(4))
+            UI.setAttribute('name-panel' .. i, 'color', '#000000b0')
+        else UI.setAttribute('name-panel' .. i, 'color', 'clear') end
+        local total = {axis = 0, allies = 0}
+        for nation, _ in pairs(combatants[data.region.id]) do
+            local side = Nations[nation].side
+            total[side] = total[side] + 1
+            UI.setAttributes('combatants' .. i .. '-' .. side .. total[side], {image = nation, active = true})
+        end
+        for side, count in pairs(total) do
+            debug(count, ' ', side, ' combatants')
+            if count < 3 then for j = count + 1, 3 do UI.hide('combatants' .. i .. '-' .. side .. j) end end
+            UI.setAttribute('combatants' .. i .. '-' .. side, 'padding', 29 - 9 * count .. ' ' .. 29 - 9 * count .. ' 1 1')
+        end
+        if hotspot.hasTag('inactive') then HUD.Combat:done(i)
+        elseif hotspot.hasTag('busy') then HUD.Combat:active(i)
+        else HUD.Combat:passive(i) end
+        UI.show('hotspot' .. i)
+    end
+    UI.setAttributes('combat', {height = 26 + 24 * #regions, offsetXY = '0 ' .. -12 * (24 - #regions)})
+    Wait.frames(function () if #regions < 24 then for j = #regions + 1, 24 do UI.hide('hotspot' .. j) end end end, 1)
+    HUD.open('combat')
+    state.battle_queue = {}
+    local resume, all_clear = coroutine.wrap(function () while self:nextTurn() do coroutine.yield() end end)
+    tryObjectRandomize = |obj, player| self:tryRandomize(obj, player, resume)
+    resume()
+    repeat
+        all_clear = true
+        for _, region in pairs(Map.regions) do if region.hotspot and not region.hotspot.hasTag('inactive') then
+            all_clear = false break
+        end end
+    until all_clear or coroutine.yield()
+    self.resume, state.battle_queue, tryObjectRandomize = nil
+end
+
+function Combat:tryRandomize(obj, player, resume)
+    local hotspot
+    if obj ~= nil and obj.getName() == 'hotspot' then
+        for _, region in pairs(Map.regions) do if region.hotspot and region.hotspot.guid == obj.guid then
+            if obj.hasTag('raid') then region.hotspot.resume()
+            elseif obj.hasTag('active') and region.hotspot:getCombatants()[turnOrder[state.step]] then
+                if player == 'Black' or Nations[turnOrder[state.step]].side == Nations:byPlayer(player).side then
+                    if region.hotspot:activate() then resume() end
+        end end end end
+        return false
+    end
+    return true
+end
+
+function Combat:nextTurn()
+    debug('Advancing to next combat turn')
+    local turn_order, next_turn, counts, nation = turnOrder.get(), state.step, {}
+    HUD.updateStatus(turn_order[state.step])
+    for id, commands in pairs(Commands:byRegion()) do
+        local hotspot = Map.regions[id].hotspot
+        if hotspot and hotspot.hasTag('active') then for nation, _ in pairs(hotspot:getCombatants(commands)) do
+            counts[nation] = (counts[nation] or 0) + 1
+    end end end
+    repeat
+        next_turn = next_turn % #turn_order + 1
+        nation = turn_order[next_turn]
+    until counts[nation] or next_turn == state.step
+    HUD.updateTurn(nation)
+    if counts[nation] then HUD.updateStatus(nation, counts[nation], nil, 'hotspot') else HUD.updateStatus(nation) end
+    state.step = next_turn
+    return counts[nation] ~= nil
+end
+
+-- Hotspot helper functions
+
+function Combat.nationOnly(nation, ...)
+    local commands = {}
+    for _, list in pairs({...}) do if list then
+        for _, item in ipairs(list) do table.insert(commands, item) end
+    end end
+    for _, command in ipairs(commands) do if command.nation ~= nation then return false end end
+    return true
+end
+
+function Combat.convoyOnly(nation, convoys)
+    local owner
+    for _, cluster in ipairs(convoys) do for origin, _ in pairs(cluster) do
+        owner = Map.regions[origin:find('-') and origin:match('^%w+') or origin]:owner()
+        if owner ~= nation then return false end
+    end end
+    return true
+end
+
+-- -- Combat actions
+
+Combat.Action = {__call = function (T, hotspot, commands)
+    local t = {hotspot = hotspot}
+    setmetatable(t, {__index = T})
+    t.resume = coroutine.wrap(|...| t:main(...))
+    hotspot.resume = t.resume
+    t.resume(commands)
+end, __index = Combat}
+setmetatable(Combat.Action, {__call = function (T)
+    local t = {}
+    setmetatable(t, T)
+    return t
+end})
+
+----#include phases/combat
